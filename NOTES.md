@@ -131,3 +131,68 @@ passed on the moratorium/restriction signal alone, per the instruction
 that a ban/moratorium is sufficient on its own. Worth confirming this is
 the intended scope, since the category's stated definition is "over
 50MW" specifically.
+
+Resolved the above: user confirmed the MW/megawatt figure should be
+required, not just a moratorium/restriction word. Updated
+`_judge_data_center_relevance` to require the size-threshold pattern as a
+mandatory `AND` condition alongside construction/siting or restriction
+language. Re-verified the NY moratorium bill (no stated MW figure) now
+correctly drops. Live counts weren't re-confirmed end-to-end after this
+change because Open States started 429ing (see below), but the specific
+bill that motivated the change was independently re-checked as correct in
+two separate partial runs before committing.
+
+Implemented `src/classify.py` against the real Anthropic API. Design:
+
+- **Structured JSON output** (`output_config.format` with a `json_schema`)
+  rather than free-text parsing, with the category `id` field's enum
+  constrained per-call to the taxonomy's actual ids from config.yaml — so
+  Claude can't invent a category that doesn't exist.
+- **Thinking disabled** (`thinking: {type: "disabled"}`) to keep a
+  ~150-bill/week run fast and cheap. This is a bounded classification task
+  with no tool use, so the "tool call written as text instead of a real
+  tool_use block" failure mode that normally argues against disabling
+  thinking on Claude Opus 5 doesn't apply here.
+- **Retry-once-then-fallback**, mirroring fetch.py's pattern: any failure
+  (API error, refusal, a response that fails to parse or uses an unknown
+  category id) retries once; if that also fails, the bill gets
+  `needs_human_review: true` with the error as `review_reason` instead of
+  crashing the run.
+- **Confidence is a single overall high/medium/low per bill**, not a
+  per-category float — matches this task's explicit spec, which
+  supersedes the original stub's per-category-confidence sketch.
+  `needs_human_review` is set whenever confidence is "low" or zero
+  categories matched.
+- Model is `claude-opus-5` per the project's Claude API guidance (always
+  default to Opus unless told otherwise). Effort is `medium` — a
+  deliberate cost/quality tradeoff for a bulk classification task, not a
+  quality problem being worked around.
+
+Validation: a single-bill smoke test passed cleanly (CA SB 1106, correctly
+tagged agentic_ai + sector_health_gov_use). For the fuller sanity check,
+Open States returned 429 on every request — confirmed via 4 retries with
+20s waits in between, so this isn't the per-minute burst limit from
+earlier (that clears in seconds); it's most likely today's daily quota,
+exhausted by this session's repeated fetch/relevance testing. Rather than
+block on that, ran `classify_bills` against 4 bills using real bill text
+already pulled from Open States earlier in this session (CA SB 1106, plus
+3 NY bills: the capability-scaling/frontier-model bill, the synthetic
+content provenance bill, and the automated lending decision bill) —
+genuine bill content, just not a fresh live pull. All 4 classified
+sensibly with 0 flagged for review; results shown to the user for review.
+
+What surprised me: SB 1106 (agentic AI amendments to an existing risk
+analysis and inventory law) got tagged with 4 categories including
+`frontier_foundation_models` at only "medium" confidence, justified by a
+mention of "generative artificial intelligence" and "mass casualty
+events" that's actually describing *existing law* the bill amends, not
+something the bill itself newly regulates. Arguably over-inclusive — worth
+watching for this pattern (tagging a category based on background/context
+language in the abstract rather than what the bill itself changes) once
+classifying the full weekly batch, not just this small sample.
+
+TODO before trusting classify.py at full scale: re-run `classify_bills`
+against a fresh, complete fetch -> relevance batch once Open States'
+quota resets, to get real per-category counts across all pending bills
+(the 4-bill sample above is a quality spot-check, not a representative
+distribution).

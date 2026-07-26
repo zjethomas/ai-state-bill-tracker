@@ -11,7 +11,7 @@ import datetime
 import yaml
 
 from src.brief import render_brief
-from src.classify import classify_bill
+from src.classify import classify_bills
 from src.fetch import fetch_bills_for_state
 from src.relevance import filter_relevant_bills
 
@@ -69,10 +69,7 @@ def run() -> None:
     print(f"[main]   {len(relevant_bills)}/{len(all_bills)} bills passed the relevance gate")
 
     print("[main] step 3/4: classification")
-    classified_bills = []
-    for bill in relevant_bills:
-        classification = classify_bill(bill, config["categories"])
-        classified_bills.append({"bill": bill, "classification": classification})
+    classified_bills = classify_bills(relevant_bills, config["categories"])
     print(f"[main]   classified {len(classified_bills)} bill(s)")
 
     print("[main] step 4/4: brief")
