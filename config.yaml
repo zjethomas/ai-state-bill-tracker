@@ -1,0 +1,34 @@
+# AI State Bill Tracker — user-editable configuration.
+# Edit this file to change scope; no code changes needed for the settings below.
+
+# States to track, as Open States two-letter jurisdiction codes.
+states:
+  - CA
+  - NY
+  - UT
+
+# Which legislative session to pull. "current" resolves to each state's
+# active session at run time (via the Open States API) rather than a
+# hardcoded year, since CA/NY/UT sessions don't align on the calendar.
+session_scope: current
+
+# Taxonomy used by src/classify.py. A bill may match more than one category.
+categories:
+  - id: frontier_foundation_models
+    label: Frontier / Foundation Models
+  - id: automated_decision_making
+    label: Automated Decision-Making & Discrimination
+  - id: deepfakes_synthetic_media
+    label: Deepfakes & Synthetic Media
+  - id: chatbot_companion_disclosure
+    label: Chatbot / Companion Disclosure
+  - id: sector_health_gov_use
+    label: Sector-Specific Health & Government Use
+  - id: ai_data_privacy
+    label: AI-Specific Data & Privacy
+  - id: agentic_ai
+    label: Agentic AI
+
+# Minimum classification confidence (0.0-1.0) for a category to be
+# reported without a "needs human review" flag. See src/classify.py.
+relevance_threshold: 0.6

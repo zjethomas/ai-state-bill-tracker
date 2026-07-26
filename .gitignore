@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Environment / secrets
+.env
+
+# OS cruft
+.DS_Store
+
+# Note: output/*.md is intentionally NOT ignored — weekly briefs
+# are committed to the repo by the GitHub Action.
+
+
+# Claude Code local settings
+.claude/settings.local.json
