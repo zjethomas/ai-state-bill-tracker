@@ -28,6 +28,14 @@ categories:
     label: AI-Specific Data & Privacy
   - id: agentic_ai
     label: Agentic AI
+  # Deliberately narrow: physical infrastructure siting/construction, not
+  # AI models or software. A bill only belongs here if it bans, newly
+  # regulates, or imposes a moratorium on the CONSTRUCTION of data centers
+  # over 50MW. A bill that merely mentions "data center" in passing (e.g.
+  # a cybersecurity bill, or a tax-incentive bill that happens to cover
+  # data centers as a qualifying industry) does NOT qualify.
+  - id: data_centers
+    label: Data Centers
 
 # Minimum classification confidence (0.0-1.0) for a category to be
 # reported without a "needs human review" flag. See src/classify.py.

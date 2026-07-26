@@ -13,7 +13,7 @@ import yaml
 from src.brief import render_brief
 from src.classify import classify_bill
 from src.fetch import fetch_bills_for_state
-from src.relevance import is_substantively_about_ai
+from src.relevance import filter_relevant_bills
 
 
 def load_config(path: str = "config.yaml") -> dict:
@@ -65,7 +65,7 @@ def run() -> None:
         all_bills.extend(bills)
 
     print("[main] step 2/4: relevance filtering")
-    relevant_bills = [b for b in all_bills if is_substantively_about_ai(b)]
+    relevant_bills = filter_relevant_bills(all_bills)
     print(f"[main]   {len(relevant_bills)}/{len(all_bills)} bills passed the relevance gate")
 
     print("[main] step 3/4: classification")
