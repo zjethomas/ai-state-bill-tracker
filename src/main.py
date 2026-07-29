@@ -1,9 +1,8 @@
 """Orchestrate the pipeline: fetch -> relevance -> classify -> brief.
 
-STUB — wires the steps together and prints progress so the pipeline stays
-legible, but each step it calls is itself unimplemented (see fetch.py,
-relevance.py, classify.py, brief.py). Running this script today will raise
-NotImplementedError once it reaches the first real step.
+Wires the four steps together and prints progress at each stage so a run
+stays legible in CI logs or locally. See fetch.py, relevance.py,
+classify.py, and brief.py for the actual logic.
 """
 
 import datetime
@@ -74,7 +73,7 @@ def run() -> None:
 
     print("[main] step 4/4: brief")
     week_of = datetime.date.today().isoformat()
-    markdown = render_brief(classified_bills, week_of)
+    markdown = render_brief(classified_bills, config["categories"], config["states"], week_of)
     output_path = f"output/{week_of}-brief.md"
     with open(output_path, "w") as f:
         f.write(markdown)

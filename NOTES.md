@@ -170,15 +170,33 @@ Implemented `src/classify.py` against the real Anthropic API. Design:
 
 Validation: a single-bill smoke test passed cleanly (CA SB 1106, correctly
 tagged agentic_ai + sector_health_gov_use). For the fuller sanity check,
-Open States returned 429 on every request — confirmed via 4 retries with
-20s waits in between, so this isn't the per-minute burst limit from
-earlier (that clears in seconds); it's most likely today's daily quota,
-exhausted by this session's repeated fetch/relevance testing. Rather than
-block on that, ran `classify_bills` against 4 bills using real bill text
-already pulled from Open States earlier in this session (CA SB 1106, plus
-3 NY bills: the capability-scaling/frontier-model bill, the synthetic
-content provenance bill, and the automated lending decision bill) —
-genuine bill content, just not a fresh live pull. All 4 classified
+Open States returned 429 on every request starting ~2026-07-26 23:39 UTC
+(16:39 local) — confirmed via 4 retries with 20s waits in between, which
+ruled out the per-minute burst limit from earlier fetch.py work (that
+clears within seconds). Checked the actual response body directly with
+curl, which confirmed it's a **daily** quota, not a burst limit:
+
+    HTTP/2 429
+    {"detail":"exceeded limit of 250/day: 265"}
+
+265 requests against a 250/day cap, run up over the course of this
+session's repeated fetch.py/relevance.py testing (each fetch run makes a
+handful of paginated + jurisdiction-lookup calls per state, and there were
+many runs today). Confirms `src/fetch.py`'s free-tier assumption in the
+earlier NOTES entry (~10/min) was the wrong constraint to worry about —
+the daily cap is the one that actually bit us. Doesn't need a code change
+for classify.py's sake (that module doesn't call Open States at all), but
+worth flagging for fetch.py: the weekly GitHub Action only needs ~15-20
+Open States calls per run, comfortably under 250/day, so this is purely a
+today's-manual-testing problem, not a production risk — noting it here in
+case iteration testing needs to pace itself against the same cap again
+before the daily reset.
+
+Rather than block on the quota, ran `classify_bills` against 4 bills using
+real bill text already pulled from Open States earlier in this session (CA
+SB 1106, plus 3 NY bills: the capability-scaling/frontier-model bill, the
+synthetic content provenance bill, and the automated lending decision
+bill) — genuine bill content, just not a fresh live pull. All 4 classified
 sensibly with 0 flagged for review; results shown to the user for review.
 
 What surprised me: SB 1106 (agentic AI amendments to an existing risk
@@ -196,3 +214,158 @@ against a fresh, complete fetch -> relevance batch once Open States'
 quota resets, to get real per-category counts across all pending bills
 (the 4-bill sample above is a quality spot-check, not a representative
 distribution).
+
+## 2026-07-27
+
+Ran the full fetch -> relevance -> classify pipeline end to end, all
+three states, complete bill sets (Open States' daily quota had reset).
+First attempt hit a mid-pagination read timeout on UT (only 4/13 bills
+fetched before fetch.py's retry gave up and moved on, per its designed
+failure behavior); re-ran UT alone to get the complete 13, then re-ran
+relevance + classify against the merged CA + NY + UT set so the final
+numbers reflect the complete bill set, not a partial one.
+
+**Fetch -> relevance, per state:**
+
+| State | Fetched (pending) | Passed relevance gate |
+|---|---:|---:|
+| CA | 43 | 28 |
+| NY | 189 | 115 |
+| UT | 13 | 3 |
+| **Total** | **245** | **146** |
+
+**Classification (146/146 bills, 0 API failures/retries):**
+
+| Category | Count |
+|---|---:|
+| sector_health_gov_use | 71 |
+| automated_decision_making | 63 |
+| deepfakes_synthetic_media | 31 |
+| ai_data_privacy | 21 |
+| chatbot_companion_disclosure | 24 |
+| frontier_foundation_models | 23 |
+| agentic_ai | 5 |
+| data_centers | 1 |
+
+(Categories sum to more than 146 since a bill can match more than one.)
+
+**needs_human_review: 23/146 total** (CA 4, NY 16, UT 3) — flagged
+whenever the model reported "low" confidence or matched zero categories;
+not yet manually reviewed, just surfaced per classify.py's design.
+
+Sanity check on category distribution: `sector_health_gov_use` and
+`automated_decision_making` dominating makes sense given the taxonomy and
+what's actually moving right now (a lot of pending bills are about
+automated decision tools in employment/lending/housing, or general
+government AI-use provisions) — not an obviously wrong skew. `agentic_ai`
+(5) and `data_centers` (1) being the smallest categories also tracks: those
+are newer, narrower policy areas with fewer bills filed so far this
+session. Haven't done a manual spot-check of the 23 needs_human_review
+bills yet -- that's the natural next step before trusting this brief
+output at face value.
+
+Implemented `src/brief.py`. Design:
+
+- Groups bills by taxonomy category (config.yaml order), skipping any
+  category with zero bills this run -- no empty heading -- but still
+  naming skipped categories in a one-line note so a zero result is never
+  silently invisible. Within a category, bills are grouped by state.
+- Per-bill: bill number + title, a 1-2 sentence plain-English summary,
+  latest action, and a source link. Every summary is labeled with its
+  basis (official digest/abstract, no text available, or generation
+  failed) -- never presented as if it were more authoritative than it is.
+- Header reports total bills and a per-state breakdown; any tracked state
+  with zero bills gets an explicit "no bills matched this run" callout
+  rather than just being absent from every section (the designed
+  zero-result edge case).
+- A bill flagged `needs_human_review` by classify.py gets an inline
+  ⚠️ marker wherever it appears in a category section, plus full detail
+  (reason, confidence, categories considered) in a dedicated "Needs
+  Review" section at the end.
+- Summaries are generated by brief.py itself (a separate, lighter Claude
+  call per bill -- no JSON schema needed for a plain sentence or two;
+  thinking disabled, effort low), not folded into classify.py's call.
+  Keeps the two modules single-purpose: classify.py tags categories,
+  brief.py explains bills to a human. Computed once per unique bill and
+  cached, even though a bill can appear in multiple category sections plus
+  the Needs Review section -- avoids N-times the API cost for a bill
+  matching N categories.
+
+Bug found and fixed during the first real run: `MAX_SUMMARY_TOKENS` was
+200, and the model routinely ran past the requested "1-2 sentences" into
+unsolicited caveats ("Note: the digest doesn't specify...", "Two things
+worth flagging for the Governor's Office: ...") -- long enough that many
+responses hit the token cap and got cut off mid-word in the rendered
+brief (99 of 262 summary occurrences were truncated, no terminal
+punctuation). Fixed two ways: (1) the prompt now explicitly says write
+*only* the 1-2 sentences, no caveats or open questions; (2) raised the
+cap to 350 tokens as a safety margin; (3) added a check on
+`response.stop_reason == "max_tokens"` so a truncated response is now
+treated as a failure that retries and falls back to a visible "summary
+unavailable" note, instead of silently accepting cut-off text. Re-ran:
+0/119 successful summaries truncated after the fix (down from 99/262).
+
+**Currently blocked:** the Anthropic account ran out of API credits
+partway through the second (fixed) run -- "Your credit balance is too low
+to access the Anthropic API." Of 146 bills, only 62 got a real generated
+summary before hitting this; the other 80 correctly show the "Summary
+unavailable -- generation failed after retry" fallback (the retry-then-
+fallback logic worked exactly as designed -- it didn't crash the run or
+silently drop bills), but the brief itself is incomplete as a result. This
+is a today's-cumulative-usage problem (relevance/classify testing +
+two brief.py passes over ~140 bills each), not a code bug. Also cleaned up
+the fallback text while investigating: it was dumping the raw exception
+object (including request_id) into the reader-facing brief, which is bad
+UX regardless of the credits issue -- the console log stays verbose for
+debugging, the brief-facing text is now a short, clean sentence.
+
+`output/2026-07-27-brief.md` as committed right now is this degraded,
+partial-credit-failure version -- needs a clean re-run once the account
+has credits again before this is genuinely ready for review.
+
+Patched `src/classify.py` to distinguish transient API failures from
+persistent, account-level ones, prompted directly by the real
+credit-exhaustion incident above. That incident happened during
+brief.py's summarization pass (62 of 146 bills got a real summary before
+the account ran dry) -- classify.py's own run earlier that same day
+completed cleanly with zero failures, before credits ran out. So this is
+a proactive fix, not a fix for a failure classify.py has hit live yet: the
+same account-level condition will hit classify.py's own API calls next
+time credits run low mid-run, and before this fix it would have handled
+that exactly like brief.py's old behavior -- retrying once per bill, then
+grinding through every remaining bill with the same doomed call, each one
+landing in needs_human_review with a confusing per-bill error message
+instead of one clear "the account is out of credits" signal.
+
+Added `_is_account_level_error()`: True for 401 (`AuthenticationError`)
+and 403 (`PermissionDeniedError`) unconditionally, and for a 400
+(`BadRequestError`) specifically when its message mentions billing/credit
+keywords ("credit balance", "insufficient credit", "billing", "quota
+exceeded", "purchase credits") -- a generic 400 for some other reason
+(e.g. a genuinely malformed request) still falls through to the existing
+transient-retry path, since only the billing-flavored 400 is guaranteed
+non-recoverable. Rate limits (429) and server errors (5xx) are
+deliberately NOT treated as account-level, per the requirement -- those
+stay on the existing retry-once-then-continue path since a retry might
+actually succeed.
+
+On a detected account-level error, `classify_bill` now raises a new
+`AccountLevelAPIError` immediately -- no wasted retry, since the same
+account-level condition won't resolve itself one second later.
+`classify_bills` catches it, prints a clear stop message naming exactly
+how many bills got through before it happened, and returns those
+already-classified bills instead of raising further -- so main.py's
+pipeline can still proceed to brief.py and produce a brief from partial
+results rather than losing the whole run.
+
+Verified without spending any real API credits or waiting for the account
+to run dry again: constructed a real `anthropic.BadRequestError` locally
+(via a fake `httpx.Response` carrying the actual billing message text
+Anthropic returned yesterday) and monkeypatched `_call_and_parse` to
+raise it on the 3rd of 5 fake bills. Confirmed: exactly 3 calls made (no
+wasted retry on the billing error itself), the run stopped immediately
+rather than continuing through bills 4-5, and `classify_bills` returned
+the 2 successfully-classified bills rather than raising or losing them.
+Separately confirmed the transient path is unchanged: a fake transient
+error still retries once, then continues to the next bill with
+needs_human_review=True, exactly as before.

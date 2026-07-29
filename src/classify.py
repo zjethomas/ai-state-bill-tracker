@@ -22,6 +22,36 @@ MODEL = "claude-opus-5"
 REQUEST_DELAY_SECONDS = 1.0  # conservative pacing between calls; no documented limit hit yet
 MAX_OUTPUT_TOKENS = 1024
 
+# Message fragments that mark a 400 as a billing/quota problem specifically,
+# as opposed to some other bad request (e.g. a schema issue on our side).
+_BILLING_ERROR_KEYWORDS = ("credit balance", "insufficient credit", "billing", "quota exceeded", "purchase credits")
+
+
+class AccountLevelAPIError(Exception):
+    """A persistent, account-level API failure (out of credits, billing/quota
+    problem, bad or revoked credentials) -- as opposed to a transient one
+    (timeout, rate limit, momentary server error) that a retry might fix.
+    Raised by classify_bill to tell classify_bills to stop the run instead
+    of grinding through every remaining bill with the same doomed retry.
+    """
+
+
+def _is_account_level_error(exc: Exception) -> bool:
+    """True for errors a per-bill retry can never fix: bad/missing
+    credentials (401), no permission to bill (403), or a 400 whose message
+    specifically indicates an out-of-credits/quota account. False for
+    everything else (rate limits, server errors, network blips, or a 400
+    that isn't about billing) -- those keep the existing retry-then-move-on
+    behavior, since a retry might genuinely succeed.
+    """
+    if isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
+        return True
+    if isinstance(exc, anthropic.BadRequestError):
+        message = str(exc).lower()
+        return any(keyword in message for keyword in _BILLING_ERROR_KEYWORDS)
+    return False
+
+
 _RESPONSE_SCHEMA_TEMPLATE = {
     "type": "object",
     "properties": {
@@ -134,11 +164,20 @@ def classify_bill(bill: dict, categories: list[dict]) -> dict:
         confidence is surfaced, not silently treated as a clean result.
 
     Failure behavior:
-        The API call is retried once on any failure (network error, refused
-        request, or a response that fails to parse/validate against the
-        taxonomy). If the retry also fails, this does NOT raise -- it
-        returns a result with needs_human_review=True and review_reason
-        explaining the failure, so one bad bill can't crash the whole run.
+        Transient failures (network error, refused request, a response
+        that fails to parse/validate) are retried once. If the retry also
+        fails, this does NOT raise -- it returns a result with
+        needs_human_review=True and review_reason explaining the failure,
+        so one bad bill can't crash the whole run.
+
+        Persistent, account-level failures (out of credits, billing/quota
+        problem, bad or revoked credentials -- see
+        _is_account_level_error) are NOT retried, since a retry is
+        guaranteed to fail the same way. Instead this raises
+        AccountLevelAPIError immediately, so the caller (classify_bills)
+        can stop the run rather than grinding through every remaining
+        bill with the same doomed call.
+
         Requires ANTHROPIC_API_KEY in the environment (see .env.example).
     """
     category_ids = [c["id"] for c in categories]
@@ -151,6 +190,8 @@ def classify_bill(bill: dict, categories: list[dict]) -> dict:
             parsed = _call_and_parse(bill, categories, category_ids, schema)
             break
         except Exception as exc:
+            if _is_account_level_error(exc):
+                raise AccountLevelAPIError(str(exc)) from exc
             last_error = exc
             print(f"[classify]   attempt {attempt}/2 failed for bill {bill.get('bill_id', '?')}: {exc}")
             if attempt == 1:
@@ -200,13 +241,32 @@ def classify_bills(bills: list[dict], categories: list[dict]) -> list[dict]:
         sanity-check the results before trusting them downstream.
 
     Failure behavior:
-        Does not raise on a single bill's classification failure -- see
-        classify_bill. Paces requests with REQUEST_DELAY_SECONDS between
-        calls to stay well under rate limits.
+        Does not raise on a single bill's transient classification failure
+        -- see classify_bill. Paces requests with REQUEST_DELAY_SECONDS
+        between calls to stay well under rate limits.
+
+        On a persistent, account-level failure (classify_bill raises
+        AccountLevelAPIError -- out of credits, billing/quota problem, bad
+        credentials), stops immediately instead of repeating the same
+        doomed call for every remaining bill: prints a clear message
+        naming how many bills got through before it happened, then
+        returns just those already-classified bills rather than raising
+        further, so the pipeline can still produce a brief from partial
+        results instead of losing everything.
     """
     results = []
     for i, bill in enumerate(bills):
-        classification = classify_bill(bill, categories)
+        try:
+            classification = classify_bill(bill, categories)
+        except AccountLevelAPIError as exc:
+            remaining = len(bills) - len(results)
+            print(
+                f"[classify] STOPPED: Anthropic API reports a persistent account-level "
+                f"error ({exc}). {len(results)} of {len(bills)} bills were classified "
+                f"before this occurred -- not retrying the remaining {remaining} bill(s), "
+                "since this kind of failure won't resolve itself bill by bill."
+            )
+            break
         results.append({"bill": bill, "classification": classification})
         if i < len(bills) - 1:
             time.sleep(REQUEST_DELAY_SECONDS)
