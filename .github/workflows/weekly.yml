@@ -1,11 +1,16 @@
 name: Weekly AI bill brief
 
 on:
-  # Schedule left commented out during development so it doesn't fire
-  # while we're still building. Uncomment when ready to go live.
-  # schedule:
-  #   - cron: "0 13 * * 1"  # 13:00 UTC every Monday
+  schedule:
+    - cron: "0 13 * * 1"  # 13:00 UTC every Monday
+  # Lets you trigger a run manually from the Actions tab, outside the
+  # weekly schedule (e.g. to re-run after a fix or check something now).
   workflow_dispatch: {}
+
+permissions:
+  # Needed for the "Commit brief" step below to push back to the repo --
+  # some orgs/repos default GITHUB_TOKEN to read-only.
+  contents: write
 
 jobs:
   build-brief:
@@ -20,13 +25,19 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run pipeline
+      # Runs fetch -> relevance -> classify -> brief, in that order (see
+      # src/main.py). Keys come from GitHub secrets, never from a local
+      # .env file -- there isn't one in this environment.
+      - name: Run pipeline (fetch, relevance, classify, brief)
         env:
           OPENSTATES_API_KEY: ${{ secrets.OPENSTATES_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python -m src.main
 
-      - name: Commit new brief
+      # Only commits/pushes if the brief actually changed -- `git diff
+      # --cached --quiet` exits non-zero when there's a staged diff, so
+      # the commit only runs then.
+      - name: Commit brief
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
